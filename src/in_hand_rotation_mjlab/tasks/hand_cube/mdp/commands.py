@@ -53,8 +53,8 @@ class InHandYawCommand(CommandTerm):
     )
     self.target_yaw[env_ids] = wrap_to_pi(current_yaw + delta_yaw)
 
-  def _update_command(self) -> None:
-    pass
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
+    del env_ids  # stateless
 
 
 class InHandRotationDirectionCommand(CommandTerm):
@@ -93,11 +93,14 @@ class InHandRotationDirectionCommand(CommandTerm):
     self.prev_yaw[env_ids] = self._cube_yaw()[env_ids]
     self.cumulative_rotation[env_ids] = 0.0
 
-  def _update_command(self) -> None:
-    current_yaw = self._cube_yaw()
-    self.step_delta_yaw = wrap_to_pi(current_yaw - self.prev_yaw)
-    self.cumulative_rotation += self.step_delta_yaw
-    self.prev_yaw = current_yaw.clone()
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
+    # mjlab >= 1.6 passes None on the per-step update and the reset env ids from reset();
+    # advance the per-step yaw state only for those envs.
+    idx = slice(None) if env_ids is None else env_ids
+    current_yaw = self._cube_yaw()[idx]
+    self.step_delta_yaw[idx] = wrap_to_pi(current_yaw - self.prev_yaw[idx])
+    self.cumulative_rotation[idx] += self.step_delta_yaw[idx]
+    self.prev_yaw[idx] = current_yaw.clone()
 
 
 class HandCubeFrameVizCommand(CommandTerm):
@@ -148,8 +151,8 @@ class HandCubeFrameVizCommand(CommandTerm):
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     del env_ids
 
-  def _update_command(self) -> None:
-    pass
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
+    del env_ids  # stateless
 
   def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
     env_indices = visualizer.get_env_indices(self.num_envs)
@@ -164,12 +167,21 @@ class HandCubeFrameVizCommand(CommandTerm):
     palm_rotm_w = matrix_from_quat(palm_quat_w)
     cube_rotm_w = matrix_from_quat(cube_quat_w)
 
+    # MuJoCo 3.11's mjv_connector binding accepts only float64 NumPy arrays (not CUDA tensors), so convert once here.
+    def _np(t: torch.Tensor):
+      return t.detach().to("cpu", torch.float64).numpy()
+
+    env_origins = _np(self._env.scene.env_origins)
+    identity_rotm = _np(self._identity_rotm)
+    palm_pos_w, palm_center_pos_w, cube_pos_w = _np(palm_pos_w), _np(palm_center_pos_w), _np(cube_pos_w)
+    palm_rotm_w, cube_rotm_w = _np(palm_rotm_w), _np(cube_rotm_w)
+
     viz = self.cfg.viz
     for env_id in env_indices:
       if viz.show_world_frame:
         visualizer.add_frame(
-          position=self._env.scene.env_origins[env_id],
-          rotation_matrix=self._identity_rotm,
+          position=env_origins[env_id],
+          rotation_matrix=identity_rotm,
           scale=viz.world_frame_scale,
           axis_radius=viz.axis_radius,
           axis_colors=viz.world_axis_colors,

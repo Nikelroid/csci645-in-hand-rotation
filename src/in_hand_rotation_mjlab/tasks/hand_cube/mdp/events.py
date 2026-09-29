@@ -446,7 +446,6 @@ def set_actuator_effort_limits(
 ) -> None:
   """Set actuator effort limits and enable force limiting in MuJoCo."""
   from mjlab.actuator import IdealPdActuator
-  from mjlab.actuator.delayed_actuator import DelayedActuator
 
   env_ids = _resolve_env_ids(env, env_ids)
   if len(env_ids) == 0:
@@ -541,9 +540,8 @@ def set_actuator_effort_limits(
 
   ctrl_index = {int(cid.item()): i for i, cid in enumerate(ctrl_ids)}
   for actuator in actuators:
-    base_actuator = (
-      actuator.base_actuator if isinstance(actuator, DelayedActuator) else actuator
-    )
+    # mjlab >= 1.3 has no DelayedActuator wrapper; delay lives on the actuator itself.
+    base_actuator = actuator
     if not isinstance(base_actuator, IdealPdActuator):
       continue
 
@@ -557,6 +555,34 @@ def set_actuator_effort_limits(
     else:
       act_limits = limits[cols].unsqueeze(0).expand(len(env_ids), -1)
     base_actuator.set_effort_limit(env_ids, effort_limit=act_limits)
+
+
+def sync_actuator_delays(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  lag_range: tuple[int, int],
+  asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", actuator_names=(".*",)),
+) -> None:
+  """Sample one command lag per environment and apply it to every delayed actuator.
+
+  Port of ``mjlab.envs.mdp.sync_actuator_delays`` from mjlab 1.1.1, which mjlab 1.3
+  removed together with ``DelayedActuator``. Delay is now configured on the actuator
+  itself, and ``Actuator.set_lags`` writes the shared delay buffer. Runs as a reset
+  event, after ``scene.reset`` has cleared the buffers.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+  else:
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+  delayed = [a for a in asset.actuators if a.has_delay]
+  if not delayed:
+    return
+  lags = torch.randint(
+    lag_range[0], lag_range[1] + 1, (len(env_ids),), device=env.device, dtype=torch.long
+  )
+  for actuator in delayed:
+    actuator.set_lags(lags, env_ids)
 
 
 def inject_random_cube_pose(
